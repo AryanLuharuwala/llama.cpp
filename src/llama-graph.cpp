@@ -1815,9 +1815,11 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
             cur = ggml_view_2d(ctx0, cur, n_embd, n_tokens, cur->nb[1], 0);
         }
         res->t_inp_embd = cur;
-        if (hparams.f_embedding_scale != 0.0f) {
-            cur = ggml_scale(ctx0, cur, hparams.f_embedding_scale);
-        }
+        // NOTE: hparams.f_embedding_scale (Granite family) is deliberately NOT
+        // applied here.  It is applied exactly once, by the first stage when it
+        // converts tokens to activations (see the normal path below); the
+        // hidden state carried into a non-first stage via ubatch.embd is
+        // already scaled, so re-applying it would corrupt the result.
         cb(cur, "embd", -1);
         res->add_input(std::move(inp));
         ggml_build_forward_expand(gf, cur);

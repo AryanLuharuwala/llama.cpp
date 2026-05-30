@@ -315,6 +315,22 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
         } catch(const std::exception & e) {
             throw std::runtime_error("error loading model hyperparameters: " + std::string(e.what()));
         }
+        // Partial-layer load: n_layer is only known after load_hparams, so the
+        // upper bound is validated here.  Any out-of-range request (hi past the
+        // last layer) is treated as a misconfiguration and falls back to a
+        // full-model load.  The lower bound and hi <= lo were already screened
+        // before load_hparams; re-check defensively in case n_layer is smaller
+        // than expected.
+        if (model->hparams.layer_range_hi != 0 &&
+                (model->hparams.layer_range_hi > model->hparams.n_layer ||
+                 model->hparams.layer_range_hi <= model->hparams.layer_range_lo)) {
+            LLAMA_LOG_WARN("%s: invalid partial-layer range [%u, %u) for a model with %u layers - "
+                    "falling back to a full-model load\n",
+                    __func__, model->hparams.layer_range_lo, model->hparams.layer_range_hi,
+                    model->hparams.n_layer);
+            model->hparams.layer_range_lo = 0;
+            model->hparams.layer_range_hi = 0;
+        }
         if (model->arch == LLM_ARCH_CLIP) {
             throw std::runtime_error("CLIP cannot be used as main model, use it with --mmproj instead");
         }

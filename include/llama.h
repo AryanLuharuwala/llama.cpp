@@ -342,14 +342,27 @@ extern "C" {
         //     owns output_norm/output and produces logits/embeddings. Earlier
         //     stages instead expose the raw hidden state of their last owned
         //     layer (retrievable as embeddings) to be forwarded downstream.
+        //   * Tied embeddings: for models that have no separate `output` tensor
+        //     and reuse token_embd as the LM head (e.g. Llama 3.2 1B/3B,
+        //     SmolLM), the last stage also loads token_embd so it can build the
+        //     LM head, even though it does not own the embedding input path.
         //   * Activation-in via embd: for every non-first stage the caller is
         //     responsible for feeding the previous stage's output hidden state
         //     into llama_batch.embd. No token ids are consumed by these stages.
+        //     The embedding scale (Granite family) is applied once, by the first
+        //     stage; later stages receive an already-scaled hidden state.
         //
         // Leave both fields at 0 (the default) to load the full model on this
         // node; in that case the behaviour is identical to a normal load.
-        // Misconfiguration (hi <= lo, or a negative lo) is ignored and also
-        // falls back to a full-model load.
+        // Misconfiguration (hi <= lo, hi > n_layer, or a negative lo) is ignored
+        // and also falls back to a full-model load (with a warning).
+        //
+        // Limitations:
+        //   * Partial-layer graph support is currently implemented only for the
+        //     LLaMA-family graph builder. Other architectures should leave these
+        //     fields at 0; if set they will fall back to a full-model load.
+        //   * The KV cache is still sized for all n_layer on every stage (known
+        //     limitation, not a correctness bug).
         int32_t layer_range_lo;
         int32_t layer_range_hi;
     };

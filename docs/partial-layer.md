@@ -15,15 +15,22 @@ partial load.
 For a model with `n_layer` transformer blocks, a stage that owns layers
 `[lo, hi)`:
 
-| Resource                | Owned by stage when            |
-|-------------------------|--------------------------------|
-| `token_embd`            | `lo == 0` (first stage)        |
-| `blk.<i>.*` for `i`     | `lo <= i < hi`                 |
-| `output_norm`, `output` | `hi == n_layer` (last stage)   |
+| Resource                | Owned by stage when                        |
+|-------------------------|--------------------------------------------|
+| `token_embd`            | `lo == 0`, **or** last stage if tied (\*)  |
+| `blk.<i>.*` for `i`     | `lo <= i < hi`                             |
+| `output_norm`, `output` | `hi == n_layer` (last stage)               |
 
 Weights outside the owned set are never allocated, so each node only needs
 enough memory/VRAM for its own slice plus (on the boundary stages) the
 embedding / LM-head tensors.
+
+(\*) **Tied embeddings.** Some models (e.g. Llama 3.2 1B/3B, SmolLM) ship no
+separate `output` tensor and reuse `token_embd` as the LM head. For these, the
+last stage also loads `token_embd` so it can build the LM head, even though it
+sources its layer input from the carried activation (it does not use
+`token_embd` for the embedding input path). The first stage still owns
+`token_embd` for token-to-activation conversion as usual.
 
 ## Driving a stage
 
@@ -40,6 +47,11 @@ Activations flow between stages as raw hidden states carried in
 * **Last stage** (`hi == n_layer`): after running its layers it applies
   `output_norm` and the LM head, producing logits (or pooled embeddings) just
   like a full model.
+
+For the Granite family (`f_embedding_scale != 0`) the embedding scale is applied
+exactly once, by the first stage when it converts tokens to activations. The
+hidden state carried into later stages via `llama_batch.embd` is already scaled
+and must not be re-scaled.
 
 A minimal three-node pipeline for a 32-layer model:
 
@@ -63,10 +75,17 @@ embeddings into the next stage's `llama_batch.embd`.
 
 ## Notes and limitations
 
-* The contract above is implemented for the LLaMA-family graph builder. Other
-  architectures fall back to a full load unless they also honour
-  `llama_hparams::is_owned_layer()` in their graph and tensor-creation paths.
-* Misconfiguration (`hi <= lo`, or a negative `lo`) is ignored and silently
-  falls back to a full-model load.
+* The contract above is implemented **only** for the LLaMA-family graph builder.
+  Other architectures should leave `layer_range_lo`/`layer_range_hi` at `0`; if
+  set they will fall back to a full-model load (they do not yet honour
+  `llama_hparams::is_owned_layer()` in their graph and tensor-creation paths).
+* Tied-embedding models (no separate `output` tensor, e.g. Llama 3.2 1B/3B,
+  SmolLM) are supported: the last stage loads `token_embd` to serve as the LM
+  head. See the ownership table above.
+* Misconfiguration (`hi <= lo`, `hi > n_layer`, or a negative `lo`) is ignored
+  and falls back to a full-model load. The `hi > n_layer` case is detected after
+  the hyper-parameters are read and emits a `LLAMA_LOG_WARN`.
 * KV cache, sampling and batching are per-stage and unchanged; only the set of
-  materialised weights and the graph's input/output endpoints differ.
+  materialised weights and the graph's input/output endpoints differ. In
+  particular the KV cache is still sized for all `n_layer` on every stage; this
+  is a known limitation, not a correctness bug.

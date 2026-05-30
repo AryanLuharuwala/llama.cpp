@@ -1056,10 +1056,18 @@ struct ggml_tensor * llama_model_loader::create_tensor(
     if (hparams.layer_range_hi != 0) {
         const bool first = hparams.layer_range_lo == 0;
         const bool last  = hparams.layer_range_hi == hparams.n_layer;
-        if (!first && tn.tensor == LLM_TENSOR_TOKEN_EMBD) {
+        // A token_embd request flagged TENSOR_DUPLICATED is the tied-embedding
+        // fallback for the output tensor (see buft_for_tensor below): models
+        // with no separate `output` tensor reuse token_embd as the LM head. It
+        // must therefore follow the *output* ownership rule (owned by the last
+        // stage), not the token_embd rule, otherwise the last stage of a tied
+        // model would end up with model.output == nullptr.
+        const bool tied_output = tn.tensor == LLM_TENSOR_TOKEN_EMBD && (flags & TENSOR_DUPLICATED);
+        if (!first && tn.tensor == LLM_TENSOR_TOKEN_EMBD && !tied_output) {
             return nullptr;
         }
-        if (!last && (tn.tensor == LLM_TENSOR_OUTPUT ||
+        if (!last && (tied_output ||
+                      tn.tensor == LLM_TENSOR_OUTPUT ||
                       tn.tensor == LLM_TENSOR_OUTPUT_NORM ||
                       tn.tensor == LLM_TENSOR_OUTPUT_NORM_LFM2)) {
             return nullptr;
