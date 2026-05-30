@@ -43,6 +43,14 @@ struct llama_hparams {
     uint32_t n_ctx_train; // context size the model was trained on
     uint32_t n_embd;
     uint32_t n_layer;
+
+    // Partial-layer load (distributed PP).  If layer_range_hi > 0 this node
+    // only owns `blk.<i>.*` for i in [layer_range_lo, layer_range_hi); all
+    // other block tensors are nullptr and graph-builders must skip them.
+    // Both zero ⇒ full model (no partial load).
+    uint32_t layer_range_lo = 0;
+    uint32_t layer_range_hi = 0;
+
     int32_t n_layer_kv_from_start = -1; // if non-negative, the first n_layer_kv_from_start layers have KV cache
     uint32_t n_expert = 0;
     uint32_t n_expert_used = 0;
@@ -356,6 +364,15 @@ struct llama_hparams {
 
 
     bool use_mrope() const;
+
+    // Returns true if the given layer index is owned by this shard.
+    // When layer_range_hi == 0 (the "full model" case) every layer is owned.
+    bool is_owned_layer(uint32_t il) const {
+        if (layer_range_hi == 0) {
+            return true;
+        }
+        return il >= layer_range_lo && il < layer_range_hi;
+    }
 };
 
 static_assert(std::is_trivially_copyable<llama_hparams>::value, "llama_hparams must be trivially copyable");

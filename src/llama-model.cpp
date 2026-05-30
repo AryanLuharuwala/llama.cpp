@@ -2169,6 +2169,8 @@ llama_model_params llama_model_default_params() {
         /*.use_extra_bufts             =*/ true,
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
+        /*.layer_range_lo              =*/ 0,
+        /*.layer_range_hi              =*/ 0,
     };
 
     return result;

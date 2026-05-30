@@ -324,6 +324,34 @@ extern "C" {
         bool use_extra_bufts; // use extra buffer types (used for weight repacking)
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
+
+        // Partial-layer load: run only transformer layers [lo, hi) on this node.
+        //
+        // This turns a single model load into one stage of a pipeline-parallel
+        // (PP) inference pipeline. When layer_range_hi > 0, the loader only
+        // materialises transformer blocks `blk.<i>.*` for i in [lo, hi); all
+        // other block weights are left unallocated and the graph builder skips
+        // the corresponding layers. Contract:
+        //
+        //   * Embeddings ownership: only the first stage (layer_range_lo == 0)
+        //     owns token_embd and converts input tokens to activations. Later
+        //     stages do NOT load token_embd; they must be driven with input
+        //     activations supplied via the batch embeddings field
+        //     (llama_batch.embd), which become the input to layer `lo`.
+        //   * Output ownership: only the last stage (layer_range_hi == n_layer)
+        //     owns output_norm/output and produces logits/embeddings. Earlier
+        //     stages instead expose the raw hidden state of their last owned
+        //     layer (retrievable as embeddings) to be forwarded downstream.
+        //   * Activation-in via embd: for every non-first stage the caller is
+        //     responsible for feeding the previous stage's output hidden state
+        //     into llama_batch.embd. No token ids are consumed by these stages.
+        //
+        // Leave both fields at 0 (the default) to load the full model on this
+        // node; in that case the behaviour is identical to a normal load.
+        // Misconfiguration (hi <= lo, or a negative lo) is ignored and also
+        // falls back to a full-model load.
+        int32_t layer_range_lo;
+        int32_t layer_range_hi;
     };
 
     struct llama_sampler_seq_config {

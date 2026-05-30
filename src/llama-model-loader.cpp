@@ -1045,6 +1045,27 @@ static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hpara
 struct ggml_tensor * llama_model_loader::create_tensor(
         const llama_hparams & hparams, const buft_list_t * buft_list_cpu, const buft_list_t * buft_list_input, const buft_list_t * buft_list_output,
         const buft_list_t * buft_list_layer, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
+    // Partial-layer load: if this block index is outside our owned range,
+    // silently skip the tensor.  The corresponding layers[] slot stays
+    // nullptr and graph-builders must skip it via hparams.is_owned_layer().
+    if (tn.bid != -1 && !hparams.is_owned_layer((uint32_t) tn.bid)) {
+        return nullptr;
+    }
+    // Partial-layer load: non-first stages don't own token_embd; non-last
+    // stages don't own output_norm or output.  Skip those silently as well.
+    if (hparams.layer_range_hi != 0) {
+        const bool first = hparams.layer_range_lo == 0;
+        const bool last  = hparams.layer_range_hi == hparams.n_layer;
+        if (!first && tn.tensor == LLM_TENSOR_TOKEN_EMBD) {
+            return nullptr;
+        }
+        if (!last && (tn.tensor == LLM_TENSOR_OUTPUT ||
+                      tn.tensor == LLM_TENSOR_OUTPUT_NORM ||
+                      tn.tensor == LLM_TENSOR_OUTPUT_NORM_LFM2)) {
+            return nullptr;
+        }
+    }
+
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {

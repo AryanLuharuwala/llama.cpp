@@ -833,6 +833,13 @@ struct llm_graph_context {
 
     void cb(ggml_tensor * cur, const char * name, int il) const;
 
+    // Partial-layer load (distributed PP): returns true when `il` is inside
+    // this shard's owned layer range.  For full-model loads every layer is
+    // owned.  Graph-builders should `continue` on the opposite.
+    bool is_owned_layer(int il) const {
+        return hparams.is_owned_layer((uint32_t) il);
+    }
+
     //
     // common
     //

@@ -123,7 +123,21 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
 
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
+    // Partial-layer load (distributed PP): find the last owned layer so we
+    // know when to slice to output rows.  For a full-model load this is just
+    // `n_layer - 1`.
+    int last_owned_layer = n_layer - 1;
+    if (hparams.layer_range_hi != 0) {
+        last_owned_layer = (int) hparams.layer_range_hi - 1;
+    }
+
     for (int il = 0; il < n_layer; ++il) {
+        // Skip layers this shard doesn't own.  `inpL` carries the activation
+        // from the previous owned layer (or from build_inp_embd on stage 0).
+        if (!is_owned_layer(il)) {
+            continue;
+        }
+
         ggml_tensor * inpSA = inpL;
 
         // norm
@@ -169,7 +183,7 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
             cb(cur, "attn_out", il);
         }
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == last_owned_layer && inp_out_ids) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -226,19 +240,30 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
     }
     cur = inpL;
 
-    cur = build_norm(cur,
-            model.output_norm, NULL,
-            LLM_NORM_RMS, -1);
+    // Partial-layer load: only the stage that owns the final layer runs the
+    // terminal norm + LM head.  Intermediate stages publish the raw hidden
+    // state as `res->t_embd` so the node can forward it to the next stage.
+    const bool is_last_stage = (hparams.layer_range_hi == 0) ||
+                               (hparams.layer_range_hi == hparams.n_layer);
 
-    cb(cur, "result_norm", -1);
-    res->t_embd = cur;
+    if (is_last_stage) {
+        cur = build_norm(cur,
+                model.output_norm, NULL,
+                LLM_NORM_RMS, -1);
 
-    if constexpr (!embed) {
-        // lm_head
-        cur = build_lora_mm(model.output, cur, model.output_s);
+        cb(cur, "result_norm", -1);
+        res->t_embd = cur;
 
-        cb(cur, "result_output", -1);
-        res->t_logits = cur;
+        if constexpr (!embed) {
+            // lm_head
+            cur = build_lora_mm(model.output, cur, model.output_s);
+
+            cb(cur, "result_output", -1);
+            res->t_logits = cur;
+        }
+    } else {
+        cb(cur, "result_hidden", -1);
+        res->t_embd = cur;
     }
 
     ggml_build_forward_expand(gf, cur);

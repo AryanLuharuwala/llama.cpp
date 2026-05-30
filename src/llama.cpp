@@ -302,6 +302,13 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
 
         model->hparams.vocab_only = params.vocab_only;
         model->hparams.no_alloc   = params.no_alloc;
+        // Partial-layer load range (for distributed pipeline-parallel inference).
+        // Accept only sensible values; any misconfiguration (hi <= lo, or a
+        // negative lo) silently falls back to a full-model load.
+        if (params.layer_range_hi > params.layer_range_lo && params.layer_range_lo >= 0) {
+            model->hparams.layer_range_lo = (uint32_t) params.layer_range_lo;
+            model->hparams.layer_range_hi = (uint32_t) params.layer_range_hi;
+        }
 
         try {
             model->load_hparams(ml);
