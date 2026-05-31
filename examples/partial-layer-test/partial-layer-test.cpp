@@ -298,15 +298,17 @@ int main(int argc, char ** argv) {
     // model whose vocab has at least these ids).
     const std::vector<llama_token> tokens = { 1, 2, 3, 4, 5, 6, 7, 8 };
 
-    // discover n_layer with a metadata-only load.
+    // discover n_layer with a real (tensor-loaded) model. vocab_only must NOT
+    // be set: in vocab-only mode the loader skips tensors and reports n_layer
+    // as 0, which would make the split impossible. Start from defaults and only
+    // pin n_gpu_layers=0 so the probe matches the CPU loads used below.
     int n_layer = 0;
     {
         llama_model_params mparams = llama_model_default_params();
         mparams.n_gpu_layers = 0;
-        mparams.vocab_only   = true; // cheap; still reports n_layer
         llama_model * m = llama_model_load_from_file(model_path.c_str(), mparams);
         if (m == nullptr) {
-            fprintf(stderr, "failed to load model metadata from '%s'\n", model_path.c_str());
+            fprintf(stderr, "failed to load model from '%s'\n", model_path.c_str());
             return 1;
         }
         n_layer = llama_model_n_layer(m);
