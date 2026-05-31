@@ -10,10 +10,20 @@ find_package(Threads REQUIRED)
 
 llama_add_compile_flags()
 
+# options
+
+# Optional standalone test for the partial-layer / pipeline-parallel split
+# (layer_range_lo/hi). Off by default so it never disturbs the normal build;
+# enable with -DLLAMA_BUILD_PARTIAL_TEST=ON.
+option(LLAMA_BUILD_PARTIAL_TEST "llama: build the partial-layer pipeline test" OFF)
+
 # examples
 
 if (EMSCRIPTEN)
 else()
+    if (LLAMA_BUILD_PARTIAL_TEST)
+        add_subdirectory(partial-layer-test)
+    endif()
     add_subdirectory(batched)
     add_subdirectory(debug)
     add_subdirectory(embedding)
