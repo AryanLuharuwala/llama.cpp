@@ -71,6 +71,12 @@ struct llama_model_loader {
     int n_kv      = 0;
     int n_tensors = 0;
     int n_created = 0;
+    // tensors that create_tensor() intentionally did not materialize because
+    // they fall outside this node's owned layer range (partial-layer load for
+    // distributed pipeline parallelism), or are the embeddings/output tensors
+    // that a non-owning stage skips. For a full load this stays 0 and the
+    // integrity check in done_getting_tensors() remains an exact equality.
+    int n_skipped = 0;
 
     uint64_t n_elements = 0;
     size_t   n_bytes    = 0;

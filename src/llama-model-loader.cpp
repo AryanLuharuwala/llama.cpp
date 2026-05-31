@@ -1048,7 +1048,21 @@ struct ggml_tensor * llama_model_loader::create_tensor(
     // Partial-layer load: if this block index is outside our owned range,
     // silently skip the tensor.  The corresponding layers[] slot stays
     // nullptr and graph-builders must skip it via hparams.is_owned_layer().
+    // Count a deliberately-skipped tensor toward n_skipped only if it actually
+    // exists in the file and would otherwise have been materialized (i.e. it is
+    // a non-duplicated tensor present in weights_map). This keeps the integrity
+    // invariant n_created + n_skipped == n_tensors exact: optional tensors that
+    // are absent from the file (e.g. a tied model's `output`) never counted
+    // toward n_tensors, and duplicated views never counted toward n_created, so
+    // neither must be counted as skipped.
+    auto note_skipped = [&]() {
+        if (!(flags & TENSOR_DUPLICATED) && get_weight(tn.str().c_str()) != nullptr) {
+            n_skipped++;
+        }
+    };
+
     if (tn.bid != -1 && !hparams.is_owned_layer((uint32_t) tn.bid)) {
+        note_skipped();
         return nullptr;
     }
     // Partial-layer load: non-first stages don't own token_embd; non-last
@@ -1064,12 +1078,17 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         // model would end up with model.output == nullptr.
         const bool tied_output = tn.tensor == LLM_TENSOR_TOKEN_EMBD && (flags & TENSOR_DUPLICATED);
         if (!first && tn.tensor == LLM_TENSOR_TOKEN_EMBD && !tied_output) {
+            note_skipped();
             return nullptr;
         }
         if (!last && (tied_output ||
                       tn.tensor == LLM_TENSOR_OUTPUT ||
                       tn.tensor == LLM_TENSOR_OUTPUT_NORM ||
                       tn.tensor == LLM_TENSOR_OUTPUT_NORM_LFM2)) {
+            // note_skipped() ignores TENSOR_DUPLICATED (the tied token_embd
+            // reused as the LM head) and tensors absent from the file, so the
+            // n_created + n_skipped == n_tensors invariant stays exact here too.
+            note_skipped();
             return nullptr;
         }
     }
@@ -1346,11 +1365,28 @@ void llama_model_loader::done_getting_tensors(bool partial) const {
         throw std::runtime_error(format("%s: too many tensors created; expected %d, got %d", __func__, n_tensors, n_created));
     }
     if (n_created < n_tensors) {
-        if (!partial) {
+        // Partial-layer load (distributed pipeline parallelism): create_tensor()
+        // intentionally skipped n_skipped file tensors that fall outside this
+        // node's owned layer range (plus the embeddings/output tensors a
+        // non-owning stage does not hold). Those skips are still accounted for,
+        // so we keep a real integrity check: everything in the file must be
+        // either created or deliberately skipped. A full load has n_skipped == 0
+        // and this reduces to the original exact n_created == n_tensors check,
+        // byte-for-byte identical to before.
+        if (n_skipped > 0) {
+            if (n_created + n_skipped != n_tensors) {
+                throw std::runtime_error(format(
+                    "%s: wrong number of tensors; expected %d, got %d created + %d skipped (partial-layer load)",
+                    __func__, n_tensors, n_created, n_skipped));
+            }
+            LLAMA_LOG_INFO("%s: partial-layer load — created %d of %d tensors, skipped %d outside owned layer range\n",
+                    __func__, n_created, n_tensors, n_skipped);
+        } else if (!partial) {
             throw std::runtime_error(format("%s: wrong number of tensors; expected %d, got %d", __func__, n_tensors, n_created));
+        } else {
+            LLAMA_LOG_INFO("%s: partial load — used %d of %d tensors in the file (rest belong to a sibling model on the same .gguf)\n",
+                    __func__, n_created, n_tensors);
         }
-        LLAMA_LOG_INFO("%s: partial load — used %d of %d tensors in the file (rest belong to a sibling model on the same .gguf)\n",
-                __func__, n_created, n_tensors);
     }
     if (n_tensors_moved > 0) {
         LLAMA_LOG_DEBUG("%s: tensor '%s' (%s) (and %zu others) cannot be used with preferred buffer type %s, using %s instead\n",
@@ -1387,8 +1423,29 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
     }
 
     // compute the total size of all tensors for progress reporting
-    for (const auto & it : weights_map) {
-        size_data += ggml_nbytes(it.second.tensor);
+    if (n_skipped > 0) {
+        // Partial-layer load: create_tensor() skipped the file tensors outside
+        // this node's owned layer range, so they were never added to ctx_map and
+        // load_all_data() will never load them. size_data must therefore reflect
+        // exactly what load_all_data() iterates — every materialized context
+        // tensor that maps to a file weight — otherwise size_done could never
+        // reach size_data and the final cleanup below (mmap fragment unmapping +
+        // the 1.0f progress callback) would be skipped. We assign rather than
+        // accumulate so the create-time duplicated/unused (+/-) adjustments to
+        // size_data are not double-counted against this exact, load-aligned sum.
+        size_t materialized = 0;
+        for (const auto & it : ctx_map) {
+            for (ggml_tensor * t = ggml_get_first_tensor(it.second.get()); t != nullptr; t = ggml_get_next_tensor(it.second.get(), t)) {
+                if (get_weight(ggml_get_name(t)) != nullptr) {
+                    materialized += ggml_nbytes(t);
+                }
+            }
+        }
+        size_data = materialized;
+    } else {
+        for (const auto & it : weights_map) {
+            size_data += ggml_nbytes(it.second.tensor);
+        }
     }
 }
 
